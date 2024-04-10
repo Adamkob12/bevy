@@ -5,7 +5,7 @@ use crate::storage::{
 };
 
 /// Very similar to a normal [`Column`], but with the capacities and lengths cut out for performance reasons.
-/// This type is used by [`Table`], because all of the capacities and lengths of the [`Table`]'s columns must match.
+/// This type is commonly used by [`Table`], because all of the capacities and lengths of the [`Table`]'s columns must match.
 ///
 /// [`ThinColumn`] makes a compile-time distinction between [`ZST`] types, and non-[`ZST`] types - for performance reasons.
 /// It's also much less flexible when it comes to allocations.
@@ -96,14 +96,17 @@ impl<const IS_ZST: bool> ThinColumn<IS_ZST> {
             .swap_remove_and_forget_unchecked(row.as_usize(), last_element_index);
     }
 
-    // TODO: docs
+    /// Reallocate memory for this [`ThinColumn`].
+    /// For example, if the length (number of stored components) reached the capacity (number of components the current allocation can store),
+    /// you might want to use this method to increase the allocation, so more components can be stored in the array.
     pub unsafe fn realloc(&mut self, current_capacity: NonZeroUsize, new_capacity: NonZeroUsize) {
         self.data.realloc(current_capacity, new_capacity);
         self.added_ticks.realloc(current_capacity, new_capacity);
         self.changed_ticks.realloc(current_capacity, new_capacity);
     }
 
-    // TODO: docs
+    /// Allocate a block of memory for this [`ThinColumn`]. This should be used to initalize the column, do not use this
+    /// method if there are already components stored in the column - use [`Self::realloc`] instead.
     pub unsafe fn alloc(&mut self, new_capacity: NonZeroUsize) {
         self.data.alloc(new_capacity);
         self.added_ticks.alloc(new_capacity);
@@ -202,12 +205,22 @@ impl<const IS_ZST: bool> ThinColumn<IS_ZST> {
         }
     }
 
+    /// Clears (and drops) all of the components in the column.
+    ///
+    /// # Safety
+    /// - `len` must be the current length of the column
     pub(crate) unsafe fn clear(&mut self, len: usize) {
         self.data.clear_elements(len);
         self.added_ticks.clear_elements(len);
         self.changed_ticks.clear_elements(len);
     }
 
+    /// Drop this [`ThinColumn`], since it requires information, it cannot be the implementation for the [`Drop`] trait.
+    /// The owning type of this [`ThinColumn`] must call this method with the correct information.
+    ///
+    /// # Safety
+    /// - `cap` must be the current capacity of the column
+    /// - `len` must be the current length of the column
     pub unsafe fn drop(&mut self, cap: usize, len: usize) {
         self.added_ticks.drop(cap, len);
         self.changed_ticks.drop(cap, len);
@@ -216,11 +229,6 @@ impl<const IS_ZST: bool> ThinColumn<IS_ZST> {
         }
     }
 }
-
-//
-//
-//
-//
 
 /// A type-erased contiguous container for data of a homogeneous type.
 ///
@@ -255,7 +263,6 @@ impl Column {
     }
 
     /// Fetches the [`Layout`] for the underlying type.
-    #[allow(dead_code)]
     #[inline]
     pub fn item_layout(&self) -> Layout {
         self.data.layout()
@@ -283,7 +290,6 @@ impl Column {
     }
 
     /// Checks if the column is empty. Returns `true` if there are no elements, `false` otherwise.
-    #[allow(dead_code)]
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
@@ -352,7 +358,6 @@ impl Column {
     /// The pointer is type erased, so using this function to fetch anything
     /// other than the first element will require computing the offset using
     /// [`Column::item_layout`].
-    #[allow(dead_code)]
     #[inline]
     pub fn get_data_ptr(&self) -> Ptr<'_> {
         self.data.get_ptr()
@@ -366,7 +371,6 @@ impl Column {
     ///
     /// # Safety
     /// The type `T` must be the type of the items in this column.
-    #[allow(dead_code)]
     pub unsafe fn get_data_slice<T>(&self) -> &[UnsafeCell<T>] {
         self.data.get_slice()
     }

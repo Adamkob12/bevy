@@ -1,6 +1,5 @@
-use crate::storage::blob_vec::array_layout_unchecked;
-
 use super::blob_vec::array_layout;
+use crate::storage::blob_vec::array_layout_unchecked;
 use bevy_ptr::{OwningPtr, Ptr, PtrMut};
 use bevy_utils::OnDrop;
 use std::{
@@ -13,6 +12,8 @@ use std::{
 /// A flat, type-erased data storage type similar to a [`BlobVec`](super::blob_vec::BlobVec), but with the length and capacity cut out
 /// for performance reasons. This type is reliant on its owning type to store the capacity and length information.
 ///
+/// [`BlobArray`] also makes a compile-time distinction for ZST types, for performance reasons. Use [`new_blob_array`] to create a new array.
+///
 /// Used to densely store homogeneous ECS data. A blob is usually just an arbitrary block of contiguous memory without any identity, and
 /// could be used to represent any arbitrary data (i.e. string, arrays, etc). This type only stores meta-data about the Blob that it stores,
 /// and a pointer to the location of the start of the array, similar to a C array.
@@ -24,7 +25,7 @@ pub(super) struct BlobArray<const IS_ZST: bool = false> {
     drop: Option<unsafe fn(OwningPtr<'_>)>,
 }
 
-#[doc(hidden)]
+/// The result of using [`new_blob_array`] to create a new [`BlobArray`].
 pub enum BlobArrayCreation {
     ZST(BlobArray<true>),
     NotZST(BlobArray),
@@ -380,5 +381,197 @@ impl<const IS_ZST: bool> BlobArray<IS_ZST> {
                 drop(value);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlobArray;
+    use crate as bevy_ecs; // required for derive macros
+    use crate::storage::blob_array::{new_blob_array, BlobArrayCreation};
+    use crate::{component::Component, ptr::OwningPtr, world::World};
+    use std::num::NonZeroUsize;
+    use std::{alloc::Layout, cell::RefCell, mem, rc::Rc};
+
+    unsafe fn drop_ptr<T>(x: OwningPtr<'_>) {
+        // SAFETY: The pointer points to a valid value of type `T` and it is safe to drop this value.
+        unsafe {
+            x.drop_as::<T>();
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `blob_arr` must have a layout that matches `Layout::new::<T>()`
+    /// the `cap` and `len` must be correct
+    unsafe fn push<T>(
+        blob_arr: &mut BlobArray,
+        value: T,
+        cap: NonZeroUsize,
+        len: usize,
+    ) -> NonZeroUsize {
+        let mut new_cap = cap;
+        if cap.get() == len {
+            new_cap = cap.checked_mul(NonZeroUsize::new_unchecked(2)).unwrap();
+            blob_arr.realloc(cap, new_cap);
+        }
+        OwningPtr::make(value, |ptr| {
+            blob_arr.initialize_unchecked(len, ptr);
+        });
+        new_cap
+    }
+
+    /// # Safety
+    ///
+    /// `blob_vec` must have a layout that matches `Layout::new::<T>()`
+    unsafe fn swap_remove<T>(blob_arr: &mut BlobArray, index: usize, len: usize) -> T {
+        assert!(index < len);
+        let value = blob_arr.swap_remove_and_forget_unchecked(index, len - 1);
+        value.read::<T>()
+    }
+
+    /// # Safety
+    ///
+    /// `blob_vec` must have a layout that matches `Layout::new::<T>()`, it most store a valid `T`
+    /// value at the given `index`
+    unsafe fn get_mut<T>(blob_arr: &mut BlobArray, index: usize) -> &mut T {
+        blob_arr.get_unchecked_mut(index).deref_mut()
+    }
+
+    unsafe fn new<T>() -> BlobArray {
+        let BlobArrayCreation::NotZST(blob_arr) = new_blob_array(Layout::new::<T>(), None) else {
+            unreachable!()
+        };
+        blob_arr
+    }
+
+    unsafe fn new_with_drop<T>(drop: unsafe fn(OwningPtr<'_>)) -> BlobArray {
+        let BlobArrayCreation::NotZST(blob_arr) = new_blob_array(Layout::new::<T>(), Some(drop))
+        else {
+            unreachable!()
+        };
+        blob_arr
+    }
+
+    #[test]
+    fn resize_test() {
+        let mut blob_arr = unsafe { new::<usize>() };
+        let mut cap = NonZeroUsize::new(1).unwrap();
+        blob_arr.alloc(cap);
+        let mut len = 0;
+        // SAFETY: `i` is a usize, i.e. the type corresponding to `item_layout`
+        unsafe {
+            for i in 0..1_000 {
+                cap = push(&mut blob_arr, i as usize, cap, len);
+                len += 1;
+                dbg!(cap, len);
+            }
+        }
+
+        assert_eq!(len, 1_000);
+        assert_eq!(cap.get(), 1_024);
+    }
+
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    struct Foo {
+        a: u8,
+        b: String,
+        drop_counter: Rc<RefCell<usize>>,
+    }
+
+    impl Drop for Foo {
+        fn drop(&mut self) {
+            *self.drop_counter.borrow_mut() += 1;
+        }
+    }
+
+    #[test]
+    fn blob_array() {
+        let drop_counter = Rc::new(RefCell::new(0));
+        unsafe {
+            let drop = drop_ptr::<Foo>;
+            let mut blob_arr = new_with_drop::<Foo>(drop);
+            let mut len = 0;
+            let mut cap = NonZeroUsize::new_unchecked(2);
+            blob_arr.alloc(cap);
+            // SAFETY: the following code only deals with values of type `Foo`, which satisfies the safety requirement of `push`, `get_mut` and `swap_remove` that the
+            // values have a layout compatible to the blob vec's `item_layout`.
+            // Every index is in range.
+            {
+                let foo1 = Foo {
+                    a: 42,
+                    b: "abc".to_string(),
+                    drop_counter: drop_counter.clone(),
+                };
+                cap = push(&mut blob_arr, foo1.clone(), cap, len);
+                len += 1;
+                assert_eq!(get_mut::<Foo>(&mut blob_arr, 0), &foo1);
+
+                let mut foo2 = Foo {
+                    a: 7,
+                    b: "xyz".to_string(),
+                    drop_counter: drop_counter.clone(),
+                };
+                push::<Foo>(&mut blob_arr, foo2.clone(), cap, len);
+                len += 1;
+                assert_eq!(cap.get(), 2);
+                assert_eq!(get_mut::<Foo>(&mut blob_arr, 0), &foo1);
+                assert_eq!(get_mut::<Foo>(&mut blob_arr, 1), &foo2);
+
+                get_mut::<Foo>(&mut blob_arr, 1).a += 1;
+                assert_eq!(get_mut::<Foo>(&mut blob_arr, 1).a, 8);
+
+                let foo3 = Foo {
+                    a: 16,
+                    b: "123".to_string(),
+                    drop_counter: drop_counter.clone(),
+                };
+
+                cap = push(&mut blob_arr, foo3.clone(), cap, len);
+                len += 1;
+                assert_eq!(cap.get(), 4);
+
+                let last_index = len - 1;
+                let value = swap_remove::<Foo>(&mut blob_arr, last_index, len);
+                len -= 1;
+                assert_eq!(foo3, value);
+
+                let value = swap_remove::<Foo>(&mut blob_arr, 0, len);
+                len -= 1;
+                assert_eq!(foo1, value);
+
+                foo2.a = 8;
+                assert_eq!(get_mut::<Foo>(&mut blob_arr, 0), &foo2);
+            }
+            blob_arr.drop(cap.get(), len);
+        }
+
+        assert_eq!(*drop_counter.borrow(), 6);
+    }
+
+    #[test]
+    fn aligned_zst() {
+        // NOTE: This test is explicitly for uncovering potential UB with miri.
+
+        #[derive(Component)]
+        #[repr(align(32))]
+        struct Zst;
+
+        let mut world = World::default();
+        world.spawn(Zst);
+        world.spawn(Zst);
+        world.spawn(Zst);
+        world.spawn_empty();
+
+        let mut count = 0;
+
+        let mut q = world.query::<&Zst>();
+        for zst in q.iter(&world) {
+            // Ensure that the references returned are properly aligned.
+            assert_eq!(zst as *const Zst as usize % mem::align_of::<Zst>(), 0);
+            count += 1;
+        }
+
+        assert_eq!(count, 3);
     }
 }

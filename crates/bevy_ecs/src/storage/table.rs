@@ -6,7 +6,7 @@ use crate::{
 };
 use bevy_ptr::{OwningPtr, Ptr, UnsafeCellDeref};
 use bevy_utils::HashMap;
-pub(crate) use column::*;
+pub use column::*;
 use std::{alloc::Layout, num::NonZeroUsize, ptr::NonNull};
 use std::{
     cell::UnsafeCell,
@@ -186,7 +186,7 @@ impl TableBuilder {
 /// in a [`World`].
 ///
 /// Conceptually, a `Table` can be thought of as an `HashMap<ComponentId, Column>`, where
-/// each [`Column`] is a type-erased `Vec<T: Component>`. Each row corresponds to a single entity
+/// each [`ThinColumn`] is a type-erased `Vec<T: Component>`. Each row corresponds to a single entity
 /// (i.e. index 3 in Column A and index 3 in Column B point to different components on the same
 /// entity). Fetching components from a table involves fetching the associated column for a
 /// component type (via its [`ComponentId`]), then fetching the entity's row within that column.
@@ -200,7 +200,6 @@ pub struct Table {
     entities: Vec<Entity>,
 }
 
-// TODO: Check all methods and make sure documentation is up to date
 impl Table {
     /// Fetches a read-only slice of the entities stored within the [`Table`].
     #[inline]
@@ -355,8 +354,13 @@ impl Table {
         }
     }
 
-    // TODO: Docs
+    /// Replace the component in `row` with the component in `comp_ptr`. The previous component
+    /// will be dropped as a result.
     ///
+    /// # Safety
+    /// `row` < `self.len()`
+    /// `comp_ptr` must match the type of component that `component_id` represents
+    /// This [`Table`] must store components that match `component_id`
     pub unsafe fn replace_component(
         &mut self,
         row: TableRow,
@@ -364,6 +368,7 @@ impl Table {
         comp_ptr: OwningPtr<'_>,
         change_tick: Tick,
     ) {
+        debug_assert!(row.as_usize() < self.len());
         if let Some(col) = self.get_thin_column_mut(component_id) {
             col.replace(row, comp_ptr, change_tick);
         } else {
@@ -411,7 +416,8 @@ impl Table {
         }
     }
 
-    // TODO: Docs
+    /// Get the column that stores components that match `component_id` as a slice.
+    ///
     /// # Safety
     /// - `T` must match the `component_id`
     pub unsafe fn get_column_data_slice<T>(
@@ -425,7 +431,8 @@ impl Table {
             .map(|col| col.data.get_sub_slice(self.len()))
     }
 
-    // TODO: Docs
+    /// Get the added ticks of the column that stores components that match `component_id`
+    ///
     /// # Safety
     /// - `T` must match the `component_id`
     pub unsafe fn get_column_added_ticks(
@@ -439,7 +446,8 @@ impl Table {
             .map(|col| col.added_ticks.to_slice(self.len()))
     }
 
-    // TODO: Docs
+    /// Get the changed ticks of the column that stores components that match `component_id`
+    ///
     /// # Safety
     /// - `T` must match the `component_id`
     pub unsafe fn get_column_changed_ticks(
@@ -453,9 +461,11 @@ impl Table {
             .map(|col| col.changed_ticks.to_slice(self.len()))
     }
 
-    // TODO: Docs
+    /// Get the change tick of the component that matches `component_id` at `row`
+    ///
     /// # Safety
     /// - `T` must match the `component_id`
+    /// - `row.as_usize()` < `self.len()`
     pub unsafe fn get_column_changed_tick(
         &self,
         component_id: ComponentId,
@@ -470,9 +480,10 @@ impl Table {
             .get_unchecked(row.as_usize())
     }
 
-    // TODO: Docs
+    /// Get the added tick of the component that matches `component_id` at `row`
     /// # Safety
-    /// - `T` must match the `component_id`
+    /// This [`Table`] must hold components that match `component_id` ([`Self::has_column`] must be true for `component_id`)
+    /// `row.as_usize()` < `self.len()`
     pub unsafe fn get_column_added_tick(
         &self,
         component_id: ComponentId,
@@ -487,8 +498,10 @@ impl Table {
             .get_unchecked(row.as_usize())
     }
 
-    // TODO: Docs
+    /// Get the [`ComponentTicks`] of the component matching `component_id` at `row`
     ///
+    /// # Safety
+    /// - `row.as_usize()` < `self.len()`
     pub unsafe fn get_ticks_unchecked(
         &self,
         component_id: ComponentId,
@@ -507,7 +520,7 @@ impl Table {
             })
     }
 
-    /// Fetches a read-only reference to the [`Column`] for a given [`Component`] within the
+    /// Fetches a read-only reference to the [`ThinColumn`] for a given [`Component`] within the
     /// table.
     ///
     /// Returns `None` if the corresponding component does not belong to the table.
@@ -518,7 +531,7 @@ impl Table {
         self.columns.get(component_id)
     }
 
-    /// Fetches a mutable reference to the [`Column`] for a given [`Component`] within the
+    /// Fetches a mutable reference to the [`ThinColumn`] for a given [`Component`] within the
     /// table.
     ///
     /// Returns `None` if the corresponding component does not belong to the table.
@@ -532,7 +545,7 @@ impl Table {
         self.columns.get_mut(component_id)
     }
 
-    /// Fetches a read-only reference to the [`Column`] for a given [`Component`] within the
+    /// Fetches a read-only reference to the [`ThinColumn`] for a given `ZST` [`Component`] within the
     /// table.
     ///
     /// Returns `None` if the corresponding component does not belong to the table.
@@ -543,7 +556,7 @@ impl Table {
         self.zst_columns.get(component_id)
     }
 
-    /// Fetches a mutable reference to the [`Column`] for a given [`Component`] within the
+    /// Fetches a mutable reference to the [`ThinColumn`] for a given `ZST` [`Component`] within the
     /// table.
     ///
     /// Returns `None` if the corresponding component does not belong to the table.
@@ -557,7 +570,7 @@ impl Table {
         self.zst_columns.get_mut(component_id)
     }
 
-    /// Checks if the table contains a [`Column`] for a given [`Component`].
+    /// Checks if the table contains a [`ThinColumn`] for a given [`Component`].
     ///
     /// Returns `true` if the column is present, `false` otherwise.
     ///
@@ -592,9 +605,12 @@ impl Table {
         }
     }
 
+    /// Call [`ThinColumn::alloc`] for all of the columns in this [`Table`]
+    ///
     /// # Safety
     /// - The current capacity of the columns in 0
     pub(crate) unsafe fn alloc_columns(&mut self, new_capacity: NonZeroUsize) {
+        debug_assert!(self.capacity() == 0);
         for col in self.columns.values_mut() {
             col.alloc(new_capacity);
         }
@@ -603,6 +619,8 @@ impl Table {
         }
     }
 
+    /// Call [`ThinColumn::realloc`] for all of the columns in this [`Table`]
+    ///
     /// # Safety
     /// - `current_column_capacity` is indeed the capacity of the columns
     pub(crate) unsafe fn realloc_columns(
@@ -611,7 +629,7 @@ impl Table {
         new_capacity: NonZeroUsize,
     ) {
         // SAFETY:
-        // - There's no overflow
+        // - There's no overflow (the new capacity has been calculated)
         // - `current_capacity` is indeed the capacity - safety requirement
         // - current capacity > 0
         for col in self.columns.values_mut() {
@@ -687,12 +705,12 @@ impl Table {
         }
     }
 
-    /// Iterates over the [`Column`]s of the [`Table`].
+    /// Iterates over the non-ZSTs [`ThinColumn`]s of the [`Table`].
     pub fn iter_columns(&self) -> impl Iterator<Item = &ThinColumn<false>> {
         self.columns.values()
     }
 
-    /// Iterates over the ZST [`Column`]s of the [`Table`].
+    /// Iterates over the ZST [`ThinColumn`]s of the [`Table`].
     pub fn iter_zst_columns(&self) -> impl Iterator<Item = &ThinColumn<true>> {
         self.zst_columns.values()
     }
@@ -727,17 +745,21 @@ impl Table {
         if let Some(col) = self.get_thin_column_mut(component_id) {
             return col.data.get_unchecked_mut(row.as_usize()).promote();
         }
-        // TODO: Is this actually safe? We're need to return a pointer to a ZST - but this is no different than if we actually fetched the data, right?
+        // TODO: Is this actually safe? We're need to return a pointer to a ZST - but this is no different than
+        // if we actually fetched the data, right?
         OwningPtr::new(NonNull::dangling())
     }
 
-    // TODO: Docs
+    /// Get a [`type-erased pointer`](Ptr) to a [`Component`] at `row`
     ///
+    /// # Safety
+    /// `row.as_usize()` < `self.len()`
     pub unsafe fn get_component(
         &self,
         component_id: ComponentId,
         row: TableRow,
     ) -> Option<Ptr<'_>> {
+        debug_assert!(row.as_usize() < self.len());
         if let Some(col) = self.get_thin_column(component_id) {
             return Some(col.data.get_unchecked(row.as_usize()));
         }
@@ -872,11 +894,7 @@ impl Drop for Table {
     fn drop(&mut self) {
         let len = self.len();
         let cap = self.capacity();
-        // println!("{}", len);
-        // println!("{}", cap);
         self.entities.clear();
-        // println!("{}", self.len());
-        // println!("{}", self.capacity());
         for col in self.columns.values_mut() {
             // SAFETY: `cap` and `len` are correct
             unsafe {

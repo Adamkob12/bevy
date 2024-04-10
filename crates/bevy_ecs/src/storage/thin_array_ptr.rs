@@ -3,16 +3,19 @@ use std::alloc::{alloc, handle_alloc_error, realloc, Layout};
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
-// TODO: Better docs
-/// Similar to [`Vec<T>`], but with the capacity and length cut out for performance reasons.
-/// Similar to [`ThinSlicePtr`], but [`ThinArrayPtr`] supports reallocs (extending / shrinking the array), and swap-removes.
+/// Similar to [`Vec<T>`], but with the capacity and length cut out for performance reasons. Conceptually similar to a C array.
+/// This type is reliant on its owning type to store the capacity and length information.
 pub struct ThinArrayPtr<T> {
     data: NonNull<T>,
 }
 
 impl<T> ThinArrayPtr<T> {
-    // TODO: Docs
+    /// Create a new [`ThinArrayPtr`] with a set capacity.
+    ///
+    /// # Panics
+    /// Panics if `T` is a [`ZST`](https://doc.rust-lang.org/nomicon/exotic-sizes.html#zero-sized-types-zsts)
     pub fn with_capacity(capacity: usize) -> Self {
+        assert_ne!(Layout::new::<T>().size(), 0);
         let mut arr = ThinArrayPtr {
             data: NonNull::dangling(),
         };
@@ -24,41 +27,34 @@ impl<T> ThinArrayPtr<T> {
         arr
     }
 
-    // TODO: Is this actually needed? I think it can save a lot of branching because using `grow_exact` will check if the capacity is 0 every time.
-    // But if the caller has the capacity saved, and they are sure the capacity is 0, they can use `alloc` and save a branch.
-    /// Allocate memory for the array, this should only be used if not previous allocation has been made (capacity = 0)
+    /// Allocate memory for the array, this should only be used if no previous allocations have been made (capacity = 0)
     ///
     /// # Panics
-    /// - Panics if the new capacity overflows `usize`
+    /// - Panics if the new capacity overflows `usize` (only in debug mode)
     ///
     /// # Safety
-    /// The caller must:
     /// - Ensure that the current capacity is indeed 0
-    /// - Update their saved `capacity` value to reflect the fact that it was changed
-    pub unsafe fn alloc(&mut self, count: NonZeroUsize) {
-        let new_layout =
-            Layout::array::<T>(count.get()).expect("layout should be valid (arithmatic overflow)");
+    /// - The caller should update their saved `capacity` value to reflect the fact that it was changed
+    pub unsafe fn alloc(&mut self, capacity: NonZeroUsize) {
+        let new_layout = Layout::array::<T>(capacity.get()).debug_checked_unwrap();
         // SAFETY:
-        // - layout has non-zero size, `count` > 0, `size` > 0 (ThinArrayPtr doesn't support ZSTs)
+        // - layout has non-zero size, `capacity` > 0, `size` > 0 (ThinArrayPtr doesn't support ZSTs)
         self.data = NonNull::new(unsafe { alloc(new_layout) })
             .unwrap_or_else(|| handle_alloc_error(new_layout))
             .cast();
     }
 
-    // TODO: Is this actually needed? I think it can save a lot of branching because using `grow_exact` will check if the capacity is 0 every time.
-    // But if the caller has the capacity saved, and they are sure that capacity > 0, they can use `realloc` and save a branch.
     /// Reallocate memory for the array, this should only be used if a previous allocation for this array has been made (capacity > 0).
     ///
     /// # Panics
-    /// - Panics if the new capacity overflows `usize`
+    /// - Panics if the new capacity overflows `usize` (only in debug mode)
     ///
     /// # Safety
     /// The caller must:
     /// - Ensure that the current capacity is indeed greater than 0
     /// - Update their saved `capacity` value to reflect the fact that it was changed
     pub unsafe fn realloc(&mut self, current_capacity: NonZeroUsize, new_capacity: NonZeroUsize) {
-        let new_layout = Layout::array::<T>(new_capacity.get())
-            .expect("layout should be valid (arithmatic overflow)");
+        let new_layout = Layout::array::<T>(new_capacity.get()).debug_checked_unwrap();
         // SAFETY:
         // - ptr was be allocated via this allocator
         // - the layout of the array is the same as `Layout::array::<T>(current_capacity)`
@@ -169,14 +165,14 @@ impl<T> ThinArrayPtr<T> {
             current_capacity: usize,
             current_len: usize,
             additional: usize,
-        ) {
+        ) -> usize {
             let increment = current_capacity.max(additional - (current_capacity - current_len));
             let increment = NonZeroUsize::new(increment).unwrap();
             slf.grow_exact(current_capacity, increment);
+            increment.into()
         }
         if current_capacity - current_len < additional {
-            do_reserve::<T>(self, current_capacity, current_len, additional);
-            return additional;
+            return do_reserve::<T>(self, current_capacity, current_len, additional);
         }
         0
     }
@@ -250,7 +246,10 @@ impl<T> ThinArrayPtr<T> {
         }
     }
 
-    // TODO: Docs
+    /// Swap the element at `index` with the last element of the array (provided by `last_element_index`) and returns a raw pointer
+    /// to the element at `index` (which is now at index `last_element_index`). It is the caller's responsibility to drop the removed
+    /// element (using [`std::ptr::drop_in_place`]).
+    ///
     /// # Safety
     /// The caller must:
     /// - ensure that `index < len`
@@ -271,7 +270,8 @@ impl<T> ThinArrayPtr<T> {
         self.get_unchecked_raw(last_element_index)
     }
 
-    // TODO: Docs
+    /// Similar to [`Self::swap_remove_and_forget_unchecked`], but the removed element will be dropped.
+    ///
     /// # Safety
     /// The caller must:
     /// - ensure that `index < len`
@@ -327,6 +327,7 @@ impl<T> ThinArrayPtr<T> {
     }
 
     /// Drop the entire array and all its elements.
+    ///
     /// # Safety
     /// The caller must:
     /// - ensure that `current_len` is indeed the length of the array
@@ -339,11 +340,12 @@ impl<T> ThinArrayPtr<T> {
         }
     }
 
-    // TODO: Docs
+    /// Turn this [`ThinArrayPtr`] into a slice
+    ///
     /// # Safety
     /// - `slice_len` must match the actual length of the array
     /// but if `slice_len` will be smaller, the slice will just be smaller than need be - no UB
-    pub unsafe fn to_slice<'a>(&'a self, slice_len: usize) -> &'a [T] {
+    pub unsafe fn to_slice(&self, slice_len: usize) -> &[T] {
         // SAFETY:
         // - the data is valid - allocated with the same allocater
         // - non-null and well-aligned
@@ -364,5 +366,51 @@ impl<T> From<Box<[T]>> for ThinArrayPtr<T> {
             // SAFETY: The pointer can't be null, it came from a reference
             data: unsafe { NonNull::new_unchecked(first_element_ptr) },
         }
+    }
+}
+
+impl<T, const N: usize> From<Box<[T; N]>> for ThinArrayPtr<T> {
+    fn from(value: Box<[T; N]>) -> Self {
+        if Layout::new::<T>().size() == 0 {
+            panic!("Can't use ThinArrayPtr for ZSTs");
+        }
+        let slice_ptr = Box::<[T]>::into_raw(value);
+        // SAFETY: We just got the pointer from a reference
+        let first_element_ptr = unsafe { (*slice_ptr).as_mut_ptr() };
+        Self {
+            // SAFETY: The pointer can't be null, it came from a reference
+            data: unsafe { NonNull::new_unchecked(first_element_ptr) },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ThinArrayPtr;
+
+    #[test]
+    fn push() {
+        let arr = Box::new([1, 2, 3, 4, 5]);
+        let mut len = 5;
+        let mut cap = 5;
+        let mut thin_arr: ThinArrayPtr<i32> = arr.into();
+        unsafe { assert_eq!(thin_arr.to_slice(len), &[1, 2, 3, 4, 5]) };
+        cap += unsafe { thin_arr.push(cap, len, 6) };
+        len += 1;
+        unsafe { assert_eq!(thin_arr.to_slice(len), &[1, 2, 3, 4, 5, 6]) };
+        assert_eq!(cap, 10);
+    }
+
+    #[test]
+    fn swap_remove() {
+        let arr = Box::new([1, 2, 3, 4, 5]);
+        let mut len = 5;
+        let _cap = 5;
+        let mut thin_arr: ThinArrayPtr<i32> = arr.into();
+        {
+            unsafe { thin_arr.swap_remove_and_drop_unchecked(0, len - 1) };
+            len -= 1;
+        }
+        unsafe { assert_eq!(thin_arr.to_slice(len), &[5, 2, 3, 4]) };
     }
 }
