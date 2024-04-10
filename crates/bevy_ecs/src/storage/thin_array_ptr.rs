@@ -163,16 +163,15 @@ impl<T> ThinArrayPtr<T> {
         unsafe fn do_reserve<T>(
             slf: &mut ThinArrayPtr<T>,
             current_capacity: usize,
-            current_len: usize,
-            additional: usize,
-        ) -> usize {
-            let increment = current_capacity.max(additional - (current_capacity - current_len));
-            let increment = NonZeroUsize::new(increment).unwrap();
+            increment: NonZeroUsize,
+        ) {
             slf.grow_exact(current_capacity, increment);
-            increment.into()
         }
         if current_capacity - current_len < additional {
-            return do_reserve::<T>(self, current_capacity, current_len, additional);
+            let increment = current_capacity.max(additional - (current_capacity - current_len));
+            let increment = NonZeroUsize::new(increment).unwrap();
+            do_reserve::<T>(self, current_capacity, increment);
+            return increment.get();
         }
         0
     }

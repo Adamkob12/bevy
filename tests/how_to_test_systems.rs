@@ -90,7 +90,6 @@ fn did_despawn_enemy() {
 
     // Add our two systems
     app.add_systems(Update, (hurt_enemies, despawn_dead_enemies).chain());
-
     // Setup test entities
     let enemy_id = app
         .world_mut()
@@ -170,4 +169,18 @@ fn update_score_on_event() {
 
     // Check resulting changes
     assert_eq!(app.world().resource::<Score>().0, 3);
+}
+
+#[test]
+fn normal_app() {
+    let mut app = App::new();
+
+    #[derive(Component)]
+    struct A;
+
+    app.world_mut().spawn(A);
+    app.world_mut().spawn(A);
+    app.world_mut().spawn(A);
+    app.world_mut().spawn(A);
+    app.world_mut().spawn(A);
 }
