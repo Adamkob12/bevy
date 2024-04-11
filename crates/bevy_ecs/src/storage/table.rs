@@ -647,21 +647,20 @@ impl Table {
     pub(crate) unsafe fn allocate(&mut self, entity: Entity) -> TableRow {
         self.reserve(1);
         let len = self.len();
-        let cap = self.capacity();
         self.entities.push(entity);
         for col in self.columns.values_mut() {
             col.added_ticks
-                .push(cap, len, UnsafeCell::new(Tick::new(0)));
+                .initialize_unchecked(len, UnsafeCell::new(Tick::new(0)));
             col.changed_ticks
-                .push(cap, len, UnsafeCell::new(Tick::new(0)));
+                .initialize_unchecked(len, UnsafeCell::new(Tick::new(0)));
         }
         for zst_col in self.zst_columns.values_mut() {
             zst_col
                 .added_ticks
-                .push(cap, len, UnsafeCell::new(Tick::new(0)));
+                .initialize_unchecked(len, UnsafeCell::new(Tick::new(0)));
             zst_col
                 .changed_ticks
-                .push(cap, len, UnsafeCell::new(Tick::new(0)));
+                .initialize_unchecked(len, UnsafeCell::new(Tick::new(0)));
         }
         TableRow::from_usize(len)
     }
