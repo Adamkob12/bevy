@@ -1,17 +1,22 @@
 use crate::{
     component::{ComponentId, ComponentInfo, ComponentTicks, Components, Tick},
-    entity::Entity,
-    query::DebugCheckedUnwrap,
+    entity::{Entity},
+    query::{Access, DebugCheckedUnwrap},
     storage::{blob_vec::BlobVec, ImmutableSparseSet, SparseSet},
+    world::{
+        unsafe_world_cell::{UnsafeWorldCell},
+        FilteredEntityRef,
+    },
 };
 use bevy_ptr::{OwningPtr, Ptr, UnsafeCellDeref};
 use bevy_utils::HashMap;
 pub use column::*;
-use std::{alloc::Layout, num::NonZeroUsize};
+use std::{alloc::Layout, cmp::Ordering, num::NonZeroUsize};
 use std::{
     cell::UnsafeCell,
     ops::{Index, IndexMut},
 };
+
 mod column;
 
 /// An opaque unique ID for a [`Table`] within a [`World`].
@@ -179,6 +184,11 @@ impl TableBuilder {
     }
 }
 
+pub(crate) struct TableSorter {
+    sorted_indices: Vec<usize>,
+    sorted_entities: Vec<Entity>,
+}
+
 /// A column-oriented [structure-of-arrays] based storage for [`Component`]s of entities
 /// in a [`World`].
 ///
@@ -219,8 +229,85 @@ impl Table {
         self.entities.capacity()
     }
 
+    fn get_as_read_access(&self) -> Access<ComponentId> {
+        let mut access = Access::new();
+        self.iter_component_ids()
+            .for_each(|component_id| access.add_read(component_id));
+        access
+    }
+
+    /// Create a `TableSorter` to sort the table.
+    /// Call `Table::sort_table` with the returned value to sort the table with respect to the given comparator function. 
+    #[must_use = "The caller must use the returned TableSorter for `Table::sort_by`."]
+    pub(crate) fn prepare_table_sort(
+        &self,
+        world: UnsafeWorldCell,
+        compare: impl Fn(FilteredEntityRef, FilteredEntityRef) -> Ordering,
+    ) -> TableSorter {
+        let mut indexed_entities: Vec<(usize, Entity)> =
+            self.entities().iter().copied().enumerate().collect();
+        let sorter = |left: &(usize, Entity), right: &(usize, Entity)| -> Ordering {
+            // SAFETY: The entity is in this table, and the table is in the world (safety requirement of function), therefore the entity is valid in the world.
+            let left_entity_cell = unsafe { world.get_entity(left.1).debug_checked_unwrap() };
+            // SAFETY: The entity is in this table, and the table is in the world (safety requirement of function), therefore the entity is valid in the world.
+            let right_entity_cell = unsafe { world.get_entity(right.1).debug_checked_unwrap() };
+
+            compare(
+                // SAFETY: We have mutable access to the table where entity is stored
+                unsafe { FilteredEntityRef::new(left_entity_cell, self.get_as_read_access()) },
+                // SAFETY: We have mutable access to the table where entity is stored
+                unsafe { FilteredEntityRef::new(right_entity_cell, self.get_as_read_access()) },
+            )
+        };
+
+        indexed_entities.sort_by(sorter);
+
+        let (sorted_indices, sorted_entities): (Vec<usize>, Vec<Entity>) =
+            indexed_entities.into_iter().unzip();
+
+        TableSorter {
+            sorted_indices,
+            sorted_entities,
+        }
+    }
+
+    /// Sort the table using a pre-processed `TableSorter`.
+    ///
+    /// # Safety
+    /// The caller must provide the `TableSorter` that was returned by `Table::prepare_table_sort`.
+    pub(crate) unsafe fn sort_table(&mut self, table_sorter: TableSorter) {
+        let TableSorter { sorted_indices, sorted_entities } = table_sorter;
+        let len = self.entities.len();
+        let old_cap = self.entities.capacity();
+        let sorter = move |index: usize| -> usize {
+            sorted_indices[index]
+        };
+
+        for column in self.columns.values_mut() {
+            column.reorder_elements(&sorter, len);
+        }
+
+        self.entities = sorted_entities;
+        let new_cap = self.entities.capacity();
+
+        if old_cap > new_cap {
+            self.entities.reserve_exact(old_cap - new_cap);
+        } else if old_cap < new_cap {
+            // SAFETY: 0 < old_cap < new_cap, old_cap = current capacity of the columns
+            unsafe { self.realloc_columns(NonZeroUsize::new_unchecked(old_cap), NonZeroUsize::new_unchecked(new_cap)); }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            if let Some(col) = self.iter_columns().next() {
+                col.added_ticks.assert_capacity(self.entities.capacity());
+            }
+        }
+    }
+
     /// Removes the entity at the given row and returns the entity swapped in to replace it (if an
     /// entity was swapped in)
+    ///
     ///
     /// # Safety
     /// `row` must be in-bounds (`row.as_usize()` < `self.len()`)
@@ -621,11 +708,16 @@ impl Table {
     }
 
     /// Iterates over the [`ThinColumn`]s of the [`Table`].
-    pub fn iter_columns(&self) -> impl Iterator<Item = &ThinColumn> {
+    pub fn iter_columns(&self) -> impl Iterator<Item=&ThinColumn> {
         self.columns.values()
     }
 
-    /// Clears all of the stored components in the [`Table`].
+    /// Iterate over the [`ComponentId`]s of the components stored in this table.
+    fn iter_component_ids(&self) -> impl Iterator<Item=ComponentId> + '_ {
+        self.columns.indices()
+    }
+
+    /// Clears all the stored components in the [`Table`].
     pub(crate) fn clear(&mut self) {
         let len = self.entity_count();
         for column in self.columns.values_mut() {
@@ -758,7 +850,7 @@ impl Tables {
         *value
     }
 
-    /// Iterates through all of the tables stored within in [`TableId`] order.
+    /// Iterates through all the tables stored within in [`TableId`] order.
     pub fn iter(&self) -> std::slice::Iter<'_, Table> {
         self.tables.iter()
     }
@@ -809,23 +901,22 @@ impl Drop for Table {
 
 #[cfg(test)]
 mod tests {
-    use crate as bevy_ecs;
-    use crate::component::Component;
+    use std::cmp::Ordering;
+    use bevy_ptr::UnsafeCellDeref;
     use crate::ptr::OwningPtr;
     use crate::storage::Storages;
     use crate::{
         component::{Components, Tick},
         entity::Entity,
-        storage::{TableBuilder, TableRow},
+        storage::{TableBuilder},
     };
-    #[derive(Component)]
-    struct W<T>(T);
+    use crate::world::{FilteredEntityRef, World};
 
     #[test]
     fn table() {
         let mut components = Components::default();
         let mut storages = Storages::default();
-        let component_id = components.init_component::<W<TableRow>>(&mut storages);
+        let component_id = components.init_component::<usize>(&mut storages);
         let columns = &[component_id];
         let mut table = TableBuilder::with_capacity(0, columns.len())
             .add_column(components.get_info(component_id).unwrap())
@@ -835,7 +926,7 @@ mod tests {
             // SAFETY: we allocate and immediately set data afterwards
             unsafe {
                 let row = table.allocate(*entity);
-                let value: W<TableRow> = W(row);
+                let value = row.as_usize();
                 OwningPtr::make(value, |value_ptr| {
                     table.get_column_mut(component_id).unwrap().initialize(
                         row,
@@ -848,5 +939,41 @@ mod tests {
 
         assert_eq!(table.entity_capacity(), 256);
         assert_eq!(table.entity_count(), 200);
+    }
+
+    #[test]
+    fn sort_table() {
+        let mut world = World::new();
+
+        let component_id = {
+            let components = &mut world.components;
+            let storages = &mut world.storages;
+            components.init_component::<usize>(storages)
+        };
+        let columns = &[component_id];
+        (0..5usize).for_each(|i| {
+            world.spawn(i * (i % 2));
+        }); // 0, 1, 0, 3, 0
+        let table_id =
+            {
+                let components = &world.components;
+                let storages = &mut world.storages;
+                unsafe { storages.tables.get_id_or_insert(columns, components) }
+            };
+
+        fn sorter(left: FilteredEntityRef, right: FilteredEntityRef) -> Ordering {
+            let ul = left.get::<usize>().unwrap();
+            let ur = right.get::<usize>().unwrap();
+            <usize as Ord>::cmp(ul, ur)
+        }
+
+        let unsafe_world_cell = world.as_unsafe_world_cell_readonly();
+        let table_sorter = world.storages.tables[table_id].prepare_table_sort(unsafe_world_cell, sorter);
+        let table = &mut world.storages.tables[table_id];
+        // SAFETY: The table_sorter was just created
+        unsafe { table.sort_table(table_sorter); }
+        // SAFETY: component_id matches W<usize>
+        let col: Vec<usize> = unsafe { table.get_data_slice_for::<usize>(component_id).unwrap().iter().map(|cell| cell.read()).collect() };
+        assert_eq!(col, &[0, 0, 0, 1, 3]);
     }
 }

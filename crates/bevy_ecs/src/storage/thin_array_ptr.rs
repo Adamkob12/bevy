@@ -40,7 +40,7 @@ impl<T> ThinArrayPtr<T> {
     }
 
     #[inline(always)]
-    fn assert_capacity(&self, _capacity: usize) {
+    pub(crate) fn assert_capacity(&self, _capacity: usize) {
         #[cfg(debug_assertions)]
         {
             assert_eq!(self.capacity, _capacity);
@@ -107,8 +107,8 @@ impl<T> ThinArrayPtr<T> {
                     new_layout.size(),
                 )
             })
-            .unwrap_or_else(|| handle_alloc_error(new_layout))
-            .cast();
+                .unwrap_or_else(|| handle_alloc_error(new_layout))
+                .cast();
         }
     }
 
@@ -181,6 +181,19 @@ impl<T> ThinArrayPtr<T> {
                 // SAFETY: We can use `unwarp_unchecked` because the pointer isn't null)
                 .unwrap_unchecked()
         }
+    }
+
+    /// Swaps two nonoverlapping elements by their index in the array.
+    ///
+    /// # Safety
+    /// - idx1 != idx2
+    /// - idx1, idx2 < length
+    pub unsafe fn swap_unchecked_nonoverlapping(&mut self, idx1: usize, idx2: usize) {
+        std::ptr::swap_nonoverlapping::<T>(
+            self.get_unchecked_mut(idx1) as *mut T,
+            self.get_unchecked_mut(idx2) as *mut T,
+            1,
+        );
     }
 
     /// Perform a [`swap-remove`](https://doc.rust-lang.org/std/vec/struct.Vec.html#method.swap_remove) and return the removed value.

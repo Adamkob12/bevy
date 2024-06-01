@@ -1,13 +1,12 @@
 use bevy_ptr::PtrMut;
-
-use super::*;
 use crate::{
     component::TickCells,
     storage::{blob_array::BlobArray, thin_array_ptr::ThinArrayPtr},
 };
+use super::*;
 
 /// Very similar to a normal [`Column`], but with the capacities and lengths cut out for performance reasons.
-/// This type is used by [`Table`], because all of the capacities and lengths of the [`Table`]'s columns must match.
+/// This type is used by [`Table`], because all the capacities and lengths of the [`Table`]'s columns must match.
 ///
 /// Like many other low-level storage types, [`ThinColumn`] has a limited and highly unsafe
 /// interface. It's highly advised to use higher level types and their safe abstractions
@@ -28,6 +27,29 @@ impl ThinColumn {
             },
             added_ticks: ThinArrayPtr::with_capacity(capacity),
             changed_ticks: ThinArrayPtr::with_capacity(capacity),
+        }
+    }
+
+    /// Swaps two overlapping elements by their index in the column.
+    ///
+    /// # Safety
+    /// - idx1 != idx2
+    /// - idx1, idx2 < length
+    pub unsafe fn swap_unchecked_nonoverlapping(&mut self, idx1: usize, idx2: usize) {
+        self.data.swap_unchecked_nonoverlapping(idx1, idx2);
+        self.added_ticks.swap_unchecked_nonoverlapping(idx1, idx2);
+        self.changed_ticks.swap_unchecked_nonoverlapping(idx1, idx2);
+    }
+
+    /// Swaps two elements by their index in the column.
+    ///
+    /// # Safety
+    /// - idx1, idx2 < length
+    pub unsafe fn swap_unchecked(&mut self, idx1: usize, idx2: usize) {
+        if idx1 != idx2 {
+            self.swap_unchecked_nonoverlapping(idx1, idx2)
+        } else {
+            // No need to swap because the indices are the same
         }
     }
 
@@ -182,7 +204,7 @@ impl ThinColumn {
             .initialize_unchecked(dst_row.as_usize(), changed_tick);
     }
 
-    /// Call [`Tick::check_tick`] on all of the ticks stored in this column.
+    /// Call [`Tick::check_tick`] on all the ticks stored in this column.
     ///
     /// # Safety
     /// `len` is the actual length of this column
@@ -263,6 +285,71 @@ impl ThinColumn {
     pub unsafe fn get_changed_ticks_slice(&self, len: usize) -> &[UnsafeCell<Tick>] {
         self.changed_ticks.as_slice(len)
     }
+
+    /// Reorder the elements in this column using a sorter function.
+    /// The sorter function takes in an index (i), and returns the index of the element that needs to be at index i.
+    ///
+    /// # Example
+    /// `self` = \[3, 5, 19, -3]
+    /// `sorter` := {0 -> 3, // the element at index 3 needs to be at index 0
+    ///             1 -> 0, // the element at index 0 needs to be at index 1
+    ///             2 -> 1, // the element at index 1 needs to be at index 2
+    ///             3 -> 2, // the element at index 2 needs to be at index 3}
+    ///
+    /// After sorting the array using the sorter we get:
+    /// `self` = \[-3, 3, 5, 19]
+    ///
+    /// sorted!
+    ///
+    /// # Safety
+    /// - `sorter`: [0, len] -> [0, len]
+    /// - `sorter` is a one-to-one correspondence, meaning each element in the domain [0, len] must be mapped to one element exactly in [0, len].
+    /// - `len` must be the length of this column
+    pub unsafe fn reorder_elements(&mut self, sorter: impl Fn(usize) -> usize, mut len: usize) {
+        while len > 0 {
+            len -= 1;
+            let mut swap_with = sorter(len); // Index of the element that needs to be at index `len`
+            while swap_with > len {
+                swap_with = sorter(swap_with)
+            }
+            // SAFETY: len < actual len
+            self.swap_unchecked(len, swap_with);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy_ptr::{OwningPtr, UnsafeCellDeref};
+    use crate::component::{StorageType, Tick};
+    use crate::prelude::Component;
+    use crate::storage::TableRow;
+    use crate::world::World;
+    use super::ThinColumn;
+
+    #[test]
+    fn column_sort() {
+        let mut world = World::new();
+        impl Component for usize {
+            const STORAGE_TYPE: StorageType = StorageType::Table;
+        }
+        world.spawn(1usize);
+        let component_info = world.component_id::<usize>().map(|id| world.components().get_info(id).unwrap()).unwrap();
+        let mut col = ThinColumn::with_capacity(component_info, 100);
+        [4, 4, 600, 1, 2, 5, 10, 0, 5, 1, 2].into_iter().enumerate().for_each(|(i, x): (usize, usize)| unsafe {
+            OwningPtr::make(x, |ptr| {
+                col.initialize(TableRow::from_usize(i), ptr, Tick::MAX);
+            });
+        });
+        let sorted_index_array = [7, 3, 9, 4, 10, 0, 1, 5, 8, 6, 2];
+        let perfect_sorter = move |i: usize| -> usize {
+            sorted_index_array[i]
+        };
+        unsafe { col.reorder_elements(perfect_sorter, 11) };
+        let sorted = unsafe { col.get_data_slice_for::<usize>(11) };
+        let sorted = sorted.iter().map(|a| unsafe { a.read() }).collect::<Vec<usize>>();
+        assert_eq!(sorted, &[0, 1, 1, 2, 2, 4, 4, 5, 5, 10, 600]);
+    }
 }
 
 /// A type-erased contiguous container for data of a homogeneous type.
@@ -270,7 +357,7 @@ impl ThinColumn {
 /// Conceptually, a [`Column`] is very similar to a type-erased `Vec<T>`.
 /// It also stores the change detection ticks for its components, kept in two separate
 /// contiguous buffers internally. An element shares its data across these buffers by using the
-/// same index (i.e. the entity at row 3 has it's data at index 3 and its change detection ticks at index 3).
+/// same index (i.e. the entity at row 3 has its data at index 3 and its change detection ticks at index 3).
 ///
 /// Like many other low-level storage types, [`Column`] has a limited and highly unsafe
 /// interface. It's highly advised to use higher level types and their safe abstractions

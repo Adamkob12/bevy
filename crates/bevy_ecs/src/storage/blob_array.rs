@@ -322,6 +322,19 @@ impl BlobArray {
         }
     }
 
+    /// Swaps two nonoverlapping elements by their index in the array.
+    ///
+    /// # Safety
+    /// - idx1 != idx2
+    /// - idx1, idx2 < length
+    pub unsafe fn swap_unchecked_nonoverlapping(&mut self, idx1: usize, idx2: usize) {
+        std::ptr::swap_nonoverlapping::<u8>(
+            self.get_unchecked_mut(idx1).as_ptr(),
+            self.get_unchecked_mut(idx2).as_ptr(),
+            self.item_layout.size(),
+        );
+    }
+
     /// This method will swap two elements in the array, and return the one with the index `index_to_remove`.
     /// It is the caller's responsibility to drop the returned pointer, if that is desirable.
     ///
