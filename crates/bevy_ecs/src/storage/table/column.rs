@@ -333,13 +333,18 @@ mod tests {
         impl Component for usize {
             const STORAGE_TYPE: StorageType = StorageType::Table;
         }
-        world.spawn(1usize);
-        let component_info = world
-            .component_id::<usize>()
-            .map(|id| world.components().get_info(id).unwrap())
-            .unwrap();
+        let to_sort = [4, 4, 600, 1, 2, 5, 10, 0, 5, 1, 2];
+        let sorted = [0, 1, 1, 2, 2, 4, 4, 5, 5, 10, 600];
+        let sorted_index_array = [7, 3, 9, 4, 10, 0, 1, 5, 8, 6, 2];
+        let perfect_sorter = move |i: usize| -> usize { sorted_index_array[i] };
+        let len = to_sort.len();
+
+        let components = &mut world.components;
+        let storages = &mut world.storages;
+        let component_id = components.init_component::<usize>(storages);
+        let component_info = components.get_info(component_id).unwrap();
         let mut col = ThinColumn::with_capacity(component_info, 100);
-        [4, 4, 600, 1, 2, 5, 10, 0, 5, 1, 2]
+        to_sort
             .into_iter()
             .enumerate()
             // SAFETY: The column's type matches, i < len
@@ -348,18 +353,17 @@ mod tests {
                     col.initialize(TableRow::from_usize(i), ptr, Tick::MAX);
                 });
             });
-        let sorted_index_array = [7, 3, 9, 4, 10, 0, 1, 5, 8, 6, 2];
-        let perfect_sorter = move |i: usize| -> usize { sorted_index_array[i] };
+
         // SAFETY: all the conditions hold because they are hard-coded to match the data
-        unsafe { col.reorder_elements(perfect_sorter, 11) };
+        unsafe { col.reorder_elements(perfect_sorter, len) };
         // SAFETY: all the conditions hold because they are hard-coded to match the data
-        let sorted = unsafe { col.get_data_slice_for::<usize>(11) };
-        let sorted = sorted
+        let sort_result = unsafe { col.get_data_slice_for::<usize>(len) };
+        let sort_result = sort_result
             .iter()
             // SAFETY: no problems
             .map(|a| unsafe { a.read() })
             .collect::<Vec<usize>>();
-        assert_eq!(sorted, &[0, 1, 1, 2, 2, 4, 4, 5, 5, 10, 600]);
+        assert_eq!(sort_result, sorted);
     }
 }
 
