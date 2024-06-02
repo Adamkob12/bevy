@@ -107,8 +107,8 @@ impl<T> ThinArrayPtr<T> {
                     new_layout.size(),
                 )
             })
-                .unwrap_or_else(|| handle_alloc_error(new_layout))
-                .cast();
+            .unwrap_or_else(|| handle_alloc_error(new_layout))
+            .cast();
         }
     }
 
@@ -189,9 +189,9 @@ impl<T> ThinArrayPtr<T> {
     /// - idx1 != idx2
     /// - idx1, idx2 < length
     pub unsafe fn swap_unchecked_nonoverlapping(&mut self, idx1: usize, idx2: usize) {
-        std::ptr::swap_nonoverlapping::<T>(
-            self.get_unchecked_mut(idx1) as *mut T,
-            self.get_unchecked_mut(idx2) as *mut T,
+        ptr::swap_nonoverlapping::<T>(
+            ptr::from_mut(self.get_unchecked_mut(idx1)),
+            ptr::from_mut(self.get_unchecked_mut(idx2)),
             1,
         );
     }

@@ -1,9 +1,9 @@
-use bevy_ptr::PtrMut;
+use super::*;
 use crate::{
     component::TickCells,
     storage::{blob_array::BlobArray, thin_array_ptr::ThinArrayPtr},
 };
-use super::*;
+use bevy_ptr::PtrMut;
 
 /// Very similar to a normal [`Column`], but with the capacities and lengths cut out for performance reasons.
 /// This type is used by [`Table`], because all the capacities and lengths of the [`Table`]'s columns must match.
@@ -47,7 +47,7 @@ impl ThinColumn {
     /// - idx1, idx2 < length
     pub unsafe fn swap_unchecked(&mut self, idx1: usize, idx2: usize) {
         if idx1 != idx2 {
-            self.swap_unchecked_nonoverlapping(idx1, idx2)
+            self.swap_unchecked_nonoverlapping(idx1, idx2);
         } else {
             // No need to swap because the indices are the same
         }
@@ -310,7 +310,7 @@ impl ThinColumn {
             len -= 1;
             let mut swap_with = sorter(len); // Index of the element that needs to be at index `len`
             while swap_with > len {
-                swap_with = sorter(swap_with)
+                swap_with = sorter(swap_with);
             }
             // SAFETY: len < actual len
             self.swap_unchecked(len, swap_with);
@@ -320,12 +320,12 @@ impl ThinColumn {
 
 #[cfg(test)]
 mod tests {
-    use bevy_ptr::{OwningPtr, UnsafeCellDeref};
+    use super::ThinColumn;
     use crate::component::{StorageType, Tick};
     use crate::prelude::Component;
     use crate::storage::TableRow;
     use crate::world::World;
-    use super::ThinColumn;
+    use bevy_ptr::{OwningPtr, UnsafeCellDeref};
 
     #[test]
     fn column_sort() {
@@ -334,20 +334,31 @@ mod tests {
             const STORAGE_TYPE: StorageType = StorageType::Table;
         }
         world.spawn(1usize);
-        let component_info = world.component_id::<usize>().map(|id| world.components().get_info(id).unwrap()).unwrap();
+        let component_info = world
+            .component_id::<usize>()
+            .map(|id| world.components().get_info(id).unwrap())
+            .unwrap();
         let mut col = ThinColumn::with_capacity(component_info, 100);
-        [4, 4, 600, 1, 2, 5, 10, 0, 5, 1, 2].into_iter().enumerate().for_each(|(i, x): (usize, usize)| unsafe {
-            OwningPtr::make(x, |ptr| {
-                col.initialize(TableRow::from_usize(i), ptr, Tick::MAX);
+        [4, 4, 600, 1, 2, 5, 10, 0, 5, 1, 2]
+            .into_iter()
+            .enumerate()
+            // SAFETY: The column's type matches, i < len
+            .for_each(|(i, x): (usize, usize)| unsafe {
+                OwningPtr::make(x, |ptr| {
+                    col.initialize(TableRow::from_usize(i), ptr, Tick::MAX);
+                });
             });
-        });
         let sorted_index_array = [7, 3, 9, 4, 10, 0, 1, 5, 8, 6, 2];
-        let perfect_sorter = move |i: usize| -> usize {
-            sorted_index_array[i]
-        };
+        let perfect_sorter = move |i: usize| -> usize { sorted_index_array[i] };
+        // SAFETY: all the conditions hold because they are hard-coded to match the data
         unsafe { col.reorder_elements(perfect_sorter, 11) };
+        // SAFETY: all the conditions hold because they are hard-coded to match the data
         let sorted = unsafe { col.get_data_slice_for::<usize>(11) };
-        let sorted = sorted.iter().map(|a| unsafe { a.read() }).collect::<Vec<usize>>();
+        let sorted = sorted
+            .iter()
+            // SAFETY: no problems
+            .map(|a| unsafe { a.read() })
+            .collect::<Vec<usize>>();
         assert_eq!(sorted, &[0, 1, 1, 2, 2, 4, 4, 5, 5, 10, 600]);
     }
 }
