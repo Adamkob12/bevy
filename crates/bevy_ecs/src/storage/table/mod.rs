@@ -294,19 +294,19 @@ impl Table {
             Ordering::Greater =>
             // If the capacity shrank, we must reserve the missing space so the capacity
             // of self.entities is equal to the capacity of the columns.
-            {
-                self.entities.reserve_exact(old_cap - new_cap);
-            }
+                {
+                    self.entities.reserve_exact(old_cap - new_cap);
+                }
             Ordering::Less =>
             // If the capacity grew, we must reserve more space in each of columns
             // to match the capacity of self.entities.
             // SAFETY: 0 < old_cap < new_cap, old_cap = current capacity of the columns
-            unsafe {
-                self.realloc_columns(
-                    NonZeroUsize::new_unchecked(old_cap),
-                    NonZeroUsize::new_unchecked(new_cap),
-                );
-            },
+                unsafe {
+                    self.realloc_columns(
+                        NonZeroUsize::new_unchecked(old_cap),
+                        NonZeroUsize::new_unchecked(new_cap),
+                    );
+                },
             _ => {}
         }
 
@@ -720,12 +720,12 @@ impl Table {
     }
 
     /// Iterates over the [`ThinColumn`]s of the [`Table`].
-    pub fn iter_columns(&self) -> impl Iterator<Item = &ThinColumn> {
+    pub fn iter_columns(&self) -> impl Iterator<Item=&ThinColumn> {
         self.columns.values()
     }
 
     /// Iterate over the [`ComponentId`]s of the components stored in this table.
-    fn iter_component_ids(&self) -> impl Iterator<Item = ComponentId> + '_ {
+    fn iter_component_ids(&self) -> impl Iterator<Item=ComponentId> + '_ {
         self.columns.indices()
     }
 
