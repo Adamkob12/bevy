@@ -956,6 +956,7 @@ mod tests {
     #[test]
     fn sort_table() {
         let mut world = World::new();
+
         let component_id = {
             let components = &mut world.components;
             let storages = &mut world.storages;
